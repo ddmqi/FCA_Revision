@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CISI Revision Hub — Regulation · Securities · Derivatives</title>
+<script>
+  // Set theme before paint to avoid a flash of the wrong theme
+  (function(){
+    try{
+      var saved = localStorage.getItem("cisi_theme");
+      var theme = saved || (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark":"light");
+      document.documentElement.setAttribute("data-theme", theme);
+    }catch(e){}
+  })();
+</script>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar" id="topbar"></header>
+  <div class="layout" id="layout">
+    <main class="main" id="app"></main>
+  </div>
+
+  <!-- Data bundles (loaded as plain scripts so this works when opened directly as a local file) -->
+  <script src="data/regulation.js"></script>
+  <script src="data/securities.js"></script>
+  <script src="data/derivatives.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
