@@ -32,8 +32,33 @@ function saveStore(s){
 }
 var store = loadStore();
 function ensureExam(examKey){
-  if(!store[examKey]) store[examKey] = { chapters:{}, cards:{} };
+  if(!store[examKey]) store[examKey] = { chapters:{}, cards:{}, weak:{} };
+  if(!store[examKey].weak) store[examKey].weak = {};
   return store[examKey];
+}
+function markWeak(examKey, qid, isWeak){
+  if(!qid) return;
+  var ex = ensureExam(examKey);
+  if(isWeak) ex.weak[qid] = true; else delete ex.weak[qid];
+  saveStore(store);
+}
+function weakCount(examKey){
+  var ex = ensureExam(examKey);
+  return Object.keys(ex.weak).length;
+}
+function weakQuestions(examKey){
+  var ex = ensureExam(examKey);
+  var exam = DATA[examKey];
+  var out = [];
+  Object.keys(ex.weak).forEach(function(qid){
+    var parts = qid.split("::");
+    var chId = parts[0], i = +parts[1];
+    var ch = exam.chapters.find(function(c){ return c.id===chId; });
+    if(ch && ch.mcqs && ch.mcqs[i]){
+      out.push(Object.assign({}, ch.mcqs[i], { _qid: qid, _chapter: ch.title, _chId: ch.id }));
+    }
+  });
+  return out;
 }
 function ensureChapter(examKey, chId){
   var ex = ensureExam(examKey);
@@ -55,6 +80,48 @@ function recordQuizResult(examKey, chId, pct){
 function cardState(examKey, cardId){
   var ex = ensureExam(examKey);
   return ex.cards[cardId] || null;
+}
+
+/* ---------- exam dates / countdown ---------- */
+function getExamDates(){
+  if(!store.examDates) store.examDates = {};
+  return store.examDates;
+}
+function setExamDate(examKey, dateStr){
+  var d = getExamDates();
+  if(dateStr) d[examKey] = dateStr; else delete d[examKey];
+  saveStore(store);
+}
+function daysUntil(dateStr){
+  if(!dateStr) return null;
+  var target = new Date(dateStr+"T00:00:00");
+  if(isNaN(target.getTime())) return null;
+  var now = new Date();
+  var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target - startOfToday) / 86400000);
+}
+function weakestChapters(examKey, n){
+  var exam = DATA[examKey];
+  if(!exam) return [];
+  var scored = exam.chapters.map(function(ch){
+    var st = ensureChapter(examKey, ch.id);
+    var score = st.bestScore===null ? -1 : st.bestScore; // never-attempted ranks as most urgent
+    return { ch:ch, score:score, progress: chapterProgressPct(examKey, ch) };
+  });
+  scored.sort(function(a,b){ return a.score - b.score; });
+  return scored.slice(0, n||3);
+}
+function buildTodaysPlan(){
+  var dates = getExamDates();
+  var upcoming = EXAM_KEYS
+    .filter(function(k){ return DATA[k] && dates[k]; })
+    .map(function(k){ return { key:k, days: daysUntil(dates[k]) }; })
+    .filter(function(x){ return x.days !== null && x.days >= 0; })
+    .sort(function(a,b){ return a.days - b.days; });
+  if(upcoming.length===0) return null;
+  var target = upcoming[0];
+  var weakest = weakestChapters(target.key, 3);
+  return { examKey: target.key, days: target.days, chapters: weakest, allUpcoming: upcoming };
 }
 function setCardState(examKey, cardId, known){
   var ex = ensureExam(examKey);
@@ -95,8 +162,83 @@ var ICON = {
   target:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg>',
   shuffle:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/></svg>',
   refresh:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>',
-  home:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>'
+  home:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>',
+  pdf:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M9 15h1.5a1.5 1.5 0 0 0 0-3H9v5"/><path d="M13.5 12v5h1a2 2 0 0 0 0-4"/></svg>',
+  check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>'
 };
+
+/* ---------- payoff diagrams (SVG, drawn live so they follow the theme) ---------- */
+var PAYOFF_DEFS = {
+  "long-call": {
+    title: "Long Call — buy the right to buy",
+    sub: "Loss limited to premium paid &middot; profit unlimited above strike",
+    // points as fractions of chart area: [x(0-1), y(0-1, 0=top/max profit, 1=bottom/max loss)]
+    pts: [[0,0.78],[0.5,0.78],[1,0.12]],
+    strikeX: 0.5, breakevenX: 0.6
+  },
+  "short-call": {
+    title: "Short Call — sell the right to buy",
+    sub: "Profit limited to premium received &middot; loss unlimited above strike",
+    pts: [[0,0.28],[0.5,0.28],[1,0.9]],
+    strikeX: 0.5, breakevenX: 0.6
+  },
+  "long-put": {
+    title: "Long Put — buy the right to sell",
+    sub: "Loss limited to premium paid &middot; profit rises as price falls",
+    pts: [[0,0.12],[0.5,0.78],[1,0.78]],
+    strikeX: 0.5, breakevenX: 0.4
+  },
+  "short-put": {
+    title: "Short Put — sell the right to sell",
+    sub: "Profit limited to premium received &middot; loss rises as price falls",
+    pts: [[0,0.9],[0.5,0.28],[1,0.28]],
+    strikeX: 0.5, breakevenX: 0.4
+  },
+  "long-future": {
+    title: "Long Future — obligation to buy",
+    sub: "Symmetrical, unlimited profit and loss either side of the trade price",
+    pts: [[0,0.9],[0.5,0.5],[1,0.12]],
+    strikeX: 0.5, breakevenX: 0.5
+  },
+  "short-future": {
+    title: "Short Future — obligation to sell",
+    sub: "Symmetrical, unlimited profit and loss either side of the trade price",
+    pts: [[0,0.12],[0.5,0.5],[1,0.9]],
+    strikeX: 0.5, breakevenX: 0.5
+  }
+};
+function buildPayoffSVG(type){
+  var def = PAYOFF_DEFS[type];
+  if(!def) return "";
+  var W=400,H=190, padL=16, padR=16, padT=14, padB=14;
+  var innerW = W-padL-padR, innerH = H-padT-padB;
+  var zeroY = padT + innerH*0.5;
+  function toXY(p){ return [padL + p[0]*innerW, padT + p[1]*innerH]; }
+  var pathPts = def.pts.map(toXY);
+  var pathD = "M"+pathPts.map(function(p){return p[0].toFixed(1)+","+p[1].toFixed(1);}).join(" L");
+  var strikeX = padL + def.strikeX*innerW;
+  var isShort = type.indexOf("short")===0;
+  var lineColor = isShort ? "var(--red)" : "var(--teal)";
+  return '<div class="payoff-card">' +
+    '<div class="payoff-title">'+def.title+'</div>' +
+    '<div class="payoff-sub">'+def.sub+'</div>' +
+    '<svg viewBox="0 0 '+W+' '+H+'" class="payoff-svg" xmlns="http://www.w3.org/2000/svg">' +
+      '<line x1="'+padL+'" y1="'+zeroY+'" x2="'+(W-padR)+'" y2="'+zeroY+'" style="stroke:var(--border-strong);stroke-width:1"/>' +
+      '<line x1="'+strikeX+'" y1="'+padT+'" x2="'+strikeX+'" y2="'+(H-padB)+'" style="stroke:var(--border);stroke-width:1;stroke-dasharray:3,3"/>' +
+      '<path d="'+pathD+'" style="fill:none;stroke:'+lineColor+';stroke-width:2.5" stroke-linejoin="round"/>' +
+      '<text x="'+strikeX+'" y="'+(H-2)+'" text-anchor="middle" style="fill:var(--text-faint);font-size:10px;">Strike</text>' +
+      '<text x="'+(W-padR)+'" y="'+(zeroY-6)+'" text-anchor="end" style="fill:var(--text-faint);font-size:10px;">Underlying price &rarr;</text>' +
+      '<text x="'+padL+'" y="'+(padT+9)+'" text-anchor="start" style="fill:var(--text-faint);font-size:10px;">Profit</text>' +
+      '<text x="'+padL+'" y="'+(H-padB-2)+'" text-anchor="start" style="fill:var(--text-faint);font-size:10px;">Loss</text>' +
+    '</svg>' +
+  '</div>';
+}
+function attachDiagrams(root){
+  var els = root.querySelectorAll(".payoff-diagram[data-type]");
+  Array.prototype.forEach.call(els, function(el){
+    el.innerHTML = buildPayoffSVG(el.getAttribute("data-type"));
+  });
+}
 
 /* ---------- utilities ---------- */
 function esc(s){ return (s==null?"":String(s)); }
@@ -138,6 +280,7 @@ window.addEventListener("hashchange", render);
 var app = document.getElementById("app");
 
 function render(){
+  stopActiveTimer(); stopActiveQuizKeys();
   var parts = parseHash();
   closeSearch();
   if(parts.length===0){ renderHome(); renderTopbar(null); return; }
@@ -150,6 +293,8 @@ function render(){
   var second = parts[1];
   if(second === "_quiz"){ renderFullQuiz(examKey); return; }
   if(second === "_cards"){ renderAllFlashcards(examKey); return; }
+  if(second === "_weak"){ renderWeakSpots(examKey); return; }
+  if(second === "_export"){ renderExportPage(examKey); return; }
 
   var chId = second;
   var chapter = DATA[examKey].chapters.find(function(c){ return c.id===chId; });
@@ -238,11 +383,21 @@ function contextSnippet(hay, q){
 /* ---------- home ---------- */
 function renderHome(){
   var keys = EXAM_KEYS.filter(function(k){return DATA[k];});
+  var dates = getExamDates();
   var cards = keys.map(function(k){
     var exam = DATA[k];
     var readiness = examReadiness(k);
+    var d = daysUntil(dates[k]);
+    var countdownHtml = "";
+    if(dates[k] && d!==null){
+      if(d < 0) countdownHtml = '<span class="countdown-badge past">Exam date passed</span>';
+      else if(d===0) countdownHtml = '<span class="countdown-badge urgent">Exam is today</span>';
+      else countdownHtml = '<span class="countdown-badge'+(d<=7?' urgent':'')+'">'+d+' day'+(d===1?'':'s')+' left</span>';
+    }
     return '<div class="exam-card" data-exam="'+k+'">' +
-      '<span class="tag">'+esc(exam.subtitle)+'</span>' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">' +
+        '<span class="tag">'+esc(exam.subtitle)+'</span>' + countdownHtml +
+      '</div>' +
       '<h3>'+esc(exam.title)+'</h3>' +
       '<div class="fmt">'+esc(exam.examFormat)+'</div>' +
       '<div class="stats">' +
@@ -254,20 +409,60 @@ function renderHome(){
         '<div class="readiness-bar"><div style="width:'+readiness+'%"></div></div>' +
         '<div class="readiness-label"><span>Readiness</span><span>'+readiness+'%</span></div>' +
       '</div>' +
+      '<label class="exam-date-row" data-nostop="1"><span>Exam date</span><input type="date" class="exam-date-input" data-exam="'+k+'" value="'+(dates[k]||'')+'"/></label>' +
     '</div>';
   }).join("");
+
+  var plan = buildTodaysPlan();
+  var planHtml = "";
+  if(plan){
+    var planExam = DATA[plan.examKey];
+    planHtml =
+      '<div class="today-plan">' +
+        '<div class="today-plan-head">' +
+          '<div class="today-plan-kicker">'+ICON.target+' Today\'s focus</div>' +
+          '<div class="today-plan-days">'+plan.days+' day'+(plan.days===1?'':'s')+' until <b>'+esc(planExam.title)+'</b></div>' +
+        '</div>' +
+        '<div class="today-plan-chapters">' +
+          plan.chapters.map(function(item){
+            var label = item.score<0 ? "not started" : item.score+"% best score";
+            return '<div class="today-plan-chip" data-exam="'+plan.examKey+'" data-ch="'+item.ch.id+'">'+
+              '<span class="chapter-num">'+item.ch.number+'</span>'+
+              '<span><b>'+esc(item.ch.title)+'</b><br/><span style="color:var(--text-faint);font-size:11.5px;">'+label+'</span></span>'+
+            '</div>';
+          }).join("") +
+        '</div>' +
+      '</div>';
+  }
 
   app.innerHTML =
     '<div class="hero">' +
       '<h1>Get exam-ready.</h1>' +
       '<p>Every notion, every figure, every question style the examiner could throw at you — across all three CISI papers, in one place.</p>' +
     '</div>' +
+    planHtml +
     '<div class="exam-grid">'+cards+'</div>' +
     '<div class="footer-note">Built from your CISI study manuals · Data stays on this device (localStorage)</div>';
 
   Array.prototype.forEach.call(app.querySelectorAll(".exam-card"), function(el){
-    el.onclick = function(){ navigate([el.getAttribute("data-exam")]); };
+    el.onclick = function(e){
+      if(e.target.closest('[data-nostop]')) return;
+      navigate([el.getAttribute("data-exam")]);
+    };
   });
+  Array.prototype.forEach.call(app.querySelectorAll(".exam-date-input"), function(inp){
+    inp.onclick = function(e){ e.stopPropagation(); };
+    inp.onchange = function(e){
+      e.stopPropagation();
+      setExamDate(inp.getAttribute("data-exam"), inp.value);
+      render();
+    };
+  });
+  if(plan){
+    Array.prototype.forEach.call(app.querySelectorAll(".today-plan-chip"), function(el){
+      el.onclick = function(){ navigate([el.getAttribute("data-exam"), el.getAttribute("data-ch"), "summary"]); };
+    });
+  }
 }
 
 /* ---------- exam overview ---------- */
@@ -291,12 +486,15 @@ function renderExamOverview(examKey){
   }).join("");
 
   var readiness = examReadiness(examKey);
+  var nWeak = weakCount(examKey);
 
   app.innerHTML =
     '<div class="main-narrow">' +
     '<div class="overview-head">' +
       '<div><h1>'+esc(exam.title)+'</h1><div class="fmt">'+esc(exam.examFormat)+'</div></div>' +
       '<div class="overview-actions">' +
+        (nWeak>0 ? '<button class="btn" id="weakBtn" style="border-color:var(--red);color:var(--red);">'+ICON.target+' Weak spots ('+nWeak+')</button>' : '') +
+        '<button class="btn" id="exportBtn">'+ICON.pdf+' Export PDF</button>' +
         '<button class="btn btn-teal" id="allCardsBtn">'+ICON.cards+' All flashcards</button>' +
         '<button class="btn btn-primary" id="fullQuizBtn">'+ICON.quiz+' Full exam simulation</button>' +
       '</div>' +
@@ -315,6 +513,9 @@ function renderExamOverview(examKey){
   });
   document.getElementById("fullQuizBtn").onclick = function(){ navigate([examKey, "_quiz"]); };
   document.getElementById("allCardsBtn").onclick = function(){ navigate([examKey, "_cards"]); };
+  var wb = document.getElementById("weakBtn");
+  if(wb) wb.onclick = function(){ navigate([examKey, "_weak"]); };
+  document.getElementById("exportBtn").onclick = function(){ navigate([examKey, "_export"]); };
 }
 
 /* ---------- sidebar ---------- */
@@ -388,23 +589,190 @@ function renderDetailTab(content, chapter){
     return '<div class="section-block"><h3 class="sec-h">'+esc(s.heading)+'</h3><div class="prose">'+s.html+'</div></div>';
   }).join("");
   content.innerHTML = secs || '<div class="empty-state">No detailed notes available.</div>';
+  attachDiagrams(content);
 }
 
 /* ---------- quiz (chapter-level) ---------- */
 function renderQuizTab(content, examKey, chapter){
   var mcqs = chapter.mcqs || [];
   if(mcqs.length===0){ content.innerHTML = '<div class="empty-state">No questions for this chapter yet.</div>'; return; }
-  runQuizUI(content, examKey, chapter.title, shuffle(mcqs), function(pct){
+  var tagged = mcqs.map(function(q,i){ return Object.assign({}, q, { _qid: chapter.id+"::"+i, _chId: chapter.id, _chapter: chapter.title }); });
+  runQuizUI(content, examKey, chapter.title, shuffle(tagged), function(pct){
     recordQuizResult(examKey, chapter.id, pct);
   }, { chapterId: chapter.id });
 }
 
+/* ---------- weak spots ---------- */
+function renderWeakSpots(examKey){
+  renderSidebar(examKey, null);
+  var exam = DATA[examKey];
+  var qs = shuffle(weakQuestions(examKey));
+  app.innerHTML = '<div class="quiz-shell">' +
+    '<div class="chapter-head"><div class="crumb"><a data-nav="home">Home</a> / <a data-nav="exam">'+esc(exam.title)+'</a> / Weak spots</div>' +
+    '<h1>Weak spots</h1><div class="fmt">Every question you\'ve gotten wrong so far, across all chapters. Answer correctly to clear it from this list.</div></div>' +
+    '<div id="weakBody"></div></div>';
+  app.querySelector('[data-nav="home"]').onclick = function(){ navigate([]); };
+  app.querySelector('[data-nav="exam"]').onclick = function(){ navigate([examKey]); };
+  var body = document.getElementById("weakBody");
+  if(qs.length===0){
+    body.innerHTML = '<div class="empty-state">Nothing here yet — miss a question in any quiz and it\'ll show up here for focused drilling.</div>';
+    return;
+  }
+  runQuizUI(body, examKey, "Weak spots ("+qs.length+")", qs, function(){}, { isWeakMode:true });
+}
+
+/* ---------- PDF export ---------- */
+function renderExportPage(examKey){
+  renderSidebar(examKey, null);
+  var exam = DATA[examKey];
+  var rows = exam.chapters.map(function(ch){
+    return '<label class="export-row">' +
+      '<input type="checkbox" class="export-check" data-ch="'+ch.id+'" checked/>' +
+      '<span class="chapter-num">'+ch.number+'</span>' +
+      '<span class="export-row-text"><span class="export-row-title">'+esc(ch.title)+'</span><span class="export-row-meta">'+esc(ch.examWeight||"")+'</span></span>' +
+    '</label>';
+  }).join("");
+
+  app.innerHTML = '<div class="main-narrow">' +
+    '<div class="chapter-head"><div class="crumb"><a data-nav="home">Home</a> / <a data-nav="exam">'+esc(exam.title)+'</a> / Export PDF</div>' +
+    '<h1>Export to PDF</h1><div class="fmt">Pick what to include, then your browser\'s print dialog opens — choose "Save as PDF" as the destination.</div></div>' +
+    '<div class="export-panel">' +
+      '<div class="export-section-title">Content to include</div>' +
+      '<div class="opt-row" id="modeChips">' +
+        '<button class="chip active" data-m="both">Summary + Detailed notes</button>' +
+        '<button class="chip" data-m="summary">Summary only</button>' +
+        '<button class="chip" data-m="detail">Detailed notes only</button>' +
+        '<button class="chip" data-m="cheatsheet">Cheat sheet (condensed)</button>' +
+      '</div>' +
+      '<div id="modeHint" class="export-hint"></div>' +
+      '<div class="export-section-title" style="margin-top:22px;">Chapters <span style="font-weight:400;color:var(--text-faint);">('+exam.chapterCount+')</span></div>' +
+      '<div class="opt-row" style="margin-bottom:10px;">' +
+        '<button class="btn btn-sm" id="selAll">Select all</button>' +
+        '<button class="btn btn-sm" id="selNone">Select none</button>' +
+      '</div>' +
+      '<div class="export-list">'+rows+'</div>' +
+      '<button class="btn btn-primary" id="genPdfBtn" style="margin-top:22px;">'+ICON.pdf+' Generate PDF</button>' +
+    '</div>' +
+  '</div>';
+
+  app.querySelector('[data-nav="home"]').onclick = function(){ navigate([]); };
+  app.querySelector('[data-nav="exam"]').onclick = function(){ navigate([examKey]); };
+
+  var mode = "both";
+  var MODE_HINTS = {
+    both: "Full course notes: summary plus every detailed section, tables and diagrams. Best for a first thorough read.",
+    summary: "Just the high-yield chapter overviews. Good for a quick refresher.",
+    detail: "The complete detailed notes only, no summaries. Best as a reference to search through.",
+    cheatsheet: "Ultra-condensed: every flashcard in this exam as a dense term/answer list, grouped by chapter. Built for a last-minute re-read the night before or morning of the exam."
+  };
+  var modeChips = document.getElementById("modeChips");
+  var modeHint = document.getElementById("modeHint");
+  function updateHint(){ modeHint.textContent = MODE_HINTS[mode]; }
+  updateHint();
+  Array.prototype.forEach.call(modeChips.querySelectorAll(".chip"), function(c){
+    c.onclick = function(){
+      Array.prototype.forEach.call(modeChips.querySelectorAll(".chip"), function(x){x.classList.remove("active");});
+      c.classList.add("active"); mode = c.getAttribute("data-m");
+      updateHint();
+    };
+  });
+  document.getElementById("selAll").onclick = function(){
+    Array.prototype.forEach.call(document.querySelectorAll(".export-check"), function(cb){ cb.checked = true; });
+  };
+  document.getElementById("selNone").onclick = function(){
+    Array.prototype.forEach.call(document.querySelectorAll(".export-check"), function(cb){ cb.checked = false; });
+  };
+  document.getElementById("genPdfBtn").onclick = function(){
+    var ids = Array.prototype.filter.call(document.querySelectorAll(".export-check"), function(cb){ return cb.checked; })
+      .map(function(cb){ return cb.getAttribute("data-ch"); });
+    if(ids.length===0){ alert("Pick at least one chapter first."); return; }
+    generatePrintDoc(examKey, ids, mode);
+  };
+}
+
+function generatePrintDoc(examKey, chapterIds, mode){
+  var exam = DATA[examKey];
+  var chapters = exam.chapters.filter(function(ch){ return chapterIds.indexOf(ch.id) !== -1; });
+  var today = new Date();
+  var dateStr = today.toLocaleDateString("en-GB", { day:"numeric", month:"long", year:"numeric" });
+
+  var cover =
+    '<div class="print-cover">' +
+      '<div class="print-cover-kicker">CISI Revision Hub</div>' +
+      '<h1>'+esc(exam.title)+'</h1>' +
+      '<div class="print-cover-sub">'+esc(exam.subtitle)+' &middot; '+esc(exam.examFormat)+'</div>' +
+      '<div class="print-cover-meta">Generated '+dateStr+' &middot; '+chapters.length+' of '+exam.chapterCount+' chapters &middot; '+
+        (mode==="both"?"Summary + detailed notes":mode==="summary"?"Summary only":mode==="detail"?"Detailed notes only":"Cheat sheet (condensed)") +
+      '</div>' +
+      '<div class="print-toc"><b>Contents</b><ol>' +
+        chapters.map(function(ch){ return '<li>'+esc(ch.title)+(ch.examWeight?' <span>&middot; '+esc(ch.examWeight)+'</span>':'')+'</li>'; }).join("") +
+      '</ol></div>' +
+    '</div>';
+
+  var body;
+  if(mode==="cheatsheet"){
+    var totalCards = 0;
+    body = '<div class="print-cheat-doc">' +
+      '<div class="print-cheat-head"><div class="print-ch-kicker">'+esc(exam.title)+'</div><h2>Cheat sheet</h2><div class="print-weight">Every flashcard, grouped by chapter &mdash; for a fast last-minute read.</div></div>' +
+      chapters.map(function(ch){
+        var cards = ch.flashcards || [];
+        totalCards += cards.length;
+        if(cards.length===0) return "";
+        return '<div class="print-cheat-chapter">' +
+          '<h3 class="print-cheat-ch-title">'+ch.number+'. '+esc(ch.title)+'</h3>' +
+          '<div class="print-cheat-grid">' +
+            cards.map(function(fc){
+              return '<div class="print-cheat-item"><b>'+esc(fc.front)+'</b> &mdash; '+esc(fc.back)+'</div>';
+            }).join("") +
+          '</div>' +
+        '</div>';
+      }).join("") +
+    '</div>';
+  } else {
+    body = chapters.map(function(ch){
+      var parts = '<div class="print-chapter">' +
+        '<div class="print-ch-kicker">'+esc(exam.title)+'</div>' +
+        '<h2>'+ch.number+'. '+esc(ch.title)+'</h2>' +
+        (ch.examWeight ? '<div class="print-weight">'+esc(ch.examWeight)+'</div>' : '');
+      if(mode==="both" || mode==="summary"){
+        parts += '<h3 class="print-subhead">Summary</h3><div class="prose">'+(ch.summaryHtml||"")+'</div>';
+      }
+      if(mode==="both" || mode==="detail"){
+        parts += '<h3 class="print-subhead">Detailed notes</h3>';
+        (ch.sections||[]).forEach(function(s){
+          parts += '<h4 class="print-sec-h">'+esc(s.heading)+'</h4><div class="prose">'+s.html+'</div>';
+        });
+      }
+      parts += '</div>';
+      return parts;
+    }).join("");
+  }
+
+  var root = document.getElementById("printRoot");
+  if(!root){
+    root = document.createElement("div");
+    root.id = "printRoot";
+    document.body.appendChild(root);
+  }
+  root.innerHTML = '<div class="print-doc">'+cover+body+'</div>';
+  attachDiagrams(root);
+
+  document.body.classList.add("print-mode");
+  function cleanup(){
+    document.body.classList.remove("print-mode");
+    window.removeEventListener("afterprint", cleanup);
+  }
+  window.addEventListener("afterprint", cleanup);
+  setTimeout(function(){ window.print(); setTimeout(cleanup, 1500); }, 60);
+}
+
 /* ---------- full exam simulation ---------- */
+var EXAM_SECONDS_PER_Q = 72; // ~1.2 min/question, matching Regulation (90min/75q) and Derivatives (120min/100q) pacing
 function renderFullQuiz(examKey){
   renderSidebar(examKey, null);
   var exam = DATA[examKey];
   var all = [];
-  exam.chapters.forEach(function(ch){ (ch.mcqs||[]).forEach(function(q){ all.push(Object.assign({}, q, { _chapter: ch.title, _chId: ch.id })); }); });
+  exam.chapters.forEach(function(ch){ (ch.mcqs||[]).forEach(function(q,i){ all.push(Object.assign({}, q, { _chapter: ch.title, _chId: ch.id, _qid: ch.id+"::"+i })); }); });
 
   app.innerHTML = '<div class="quiz-shell">' +
     '<div class="chapter-head"><div class="crumb"><a data-nav="home">Home</a> / <a data-nav="exam">'+esc(exam.title)+'</a> / Full exam simulation</div>' +
@@ -412,6 +780,8 @@ function renderFullQuiz(examKey){
     '<div class="quiz-config">' +
       '<div>How many questions?</div>' +
       '<div class="opt-row" id="lenChips"></div>' +
+      '<div>Timed?</div>' +
+      '<div class="opt-row" id="timeChips"></div>' +
       '<button class="btn btn-primary" id="startFullQuiz" style="align-self:flex-start;">'+ICON.quiz+' Start</button>' +
     '</div></div>';
 
@@ -420,6 +790,7 @@ function renderFullQuiz(examKey){
 
   var options = [20, 40, all.length];
   var chosen = options[0];
+  var timed = true;
   var chips = document.getElementById("lenChips");
   chips.innerHTML = options.map(function(n,i){
     return '<button class="chip '+(i===0?"active":"")+'" data-n="'+n+'">'+n+' questions</button>';
@@ -428,35 +799,82 @@ function renderFullQuiz(examKey){
     c.onclick = function(){
       Array.prototype.forEach.call(chips.querySelectorAll(".chip"), function(x){x.classList.remove("active");});
       c.classList.add("active"); chosen = +c.getAttribute("data-n");
+      updateTimeLabel();
     };
   });
+  var timeChips = document.getElementById("timeChips");
+  function timeLabel(n){ var s = n*EXAM_SECONDS_PER_Q; return "Timed ("+Math.round(s/60)+" min)"; }
+  function renderTimeChips(){
+    timeChips.innerHTML =
+      '<button class="chip '+(timed?"active":"")+'" data-t="1">'+timeLabel(chosen)+'</button>' +
+      '<button class="chip '+(!timed?"active":"")+'" data-t="0">Untimed</button>';
+    Array.prototype.forEach.call(timeChips.querySelectorAll(".chip"), function(c){
+      c.onclick = function(){ timed = c.getAttribute("data-t")==="1"; renderTimeChips(); };
+    });
+  }
+  function updateTimeLabel(){ renderTimeChips(); }
+  renderTimeChips();
 
   document.getElementById("startFullQuiz").onclick = function(){
     var set = shuffle(all).slice(0, chosen);
     var container = document.querySelector(".quiz-shell");
     runQuizUI(container, examKey, exam.title+" — Full simulation", set, function(pctScore, byChapter){
-      // record per chapter too
       Object.keys(byChapter).forEach(function(chId){
         var b = byChapter[chId];
         recordQuizResult(examKey, chId, pct(b.correct, b.total));
       });
-    }, { isFullExam:true });
+    }, { isFullExam:true, timerSeconds: timed ? chosen*EXAM_SECONDS_PER_Q : null });
   };
 }
 
 /* ---------- generic quiz runner ---------- */
+function stopActiveTimer(){
+  if(window.__cisiTimerInterval){ clearInterval(window.__cisiTimerInterval); window.__cisiTimerInterval = null; }
+}
+function stopActiveQuizKeys(){
+  if(window.__cisiQuizKeyHandler){ document.removeEventListener("keydown", window.__cisiQuizKeyHandler); window.__cisiQuizKeyHandler = null; }
+}
+function fmtClock(sec){
+  sec = Math.max(0, Math.round(sec));
+  var m = Math.floor(sec/60), s = sec%60;
+  return m+":"+(s<10?"0":"")+s;
+}
+
 function runQuizUI(container, examKey, label, questions, onFinish, opts){
   opts = opts || {};
+  stopActiveTimer(); stopActiveQuizKeys();
   var idx = 0, correctCount = 0, answered = null;
   var byChapter = {}; // chId -> {correct,total}
+  var wrongOnes = [];
+  var timeLeft = opts.timerSeconds || null;
+  var timedOut = false;
+  var letters = ["A","B","C","D","E","F"];
+
+  function timerHtml(){
+    if(timeLeft===null) return "";
+    var low = timeLeft <= 60;
+    return '<div class="quiz-timer'+(low?' low':'')+'" id="quizTimer" style="margin-left:10px;font-weight:700;font-size:12.5px;color:'+(low?'var(--red)':'var(--text-faint)')+';white-space:nowrap;">&#9202; '+fmtClock(timeLeft)+'</div>';
+  }
+  function startTimer(){
+    if(timeLeft===null) return;
+    stopActiveTimer();
+    window.__cisiTimerInterval = setInterval(function(){
+      timeLeft--;
+      var el = document.getElementById("quizTimer");
+      if(el){ el.innerHTML = '&#9202; '+fmtClock(timeLeft); el.style.color = timeLeft<=60 ? "var(--red)" : "var(--text-faint)"; }
+      if(timeLeft<=0){
+        stopActiveTimer();
+        timedOut = true;
+        renderResult();
+      }
+    }, 1000);
+  }
 
   function renderQ(){
     var q = questions[idx];
     var barPct = Math.round(idx/questions.length*100);
-    var letters = ["A","B","C","D","E","F"];
     container.innerHTML =
-      (container.classList && container.classList.contains("quiz-shell") ? "" : "") +
-      '<div class="quiz-progress"><div class="bar"><div style="width:'+barPct+'%"></div></div><div class="count">Question '+(idx+1)+' / '+questions.length+'</div></div>' +
+      '<div class="quiz-progress"><div class="bar"><div style="width:'+barPct+'%"></div></div><div class="count">Question '+(idx+1)+' / '+questions.length+'</div>'+timerHtml()+'</div>' +
       '<div class="q-card">' +
         '<div class="q-text">'+esc(q.question)+'</div>' +
         '<div class="q-opts" id="qOpts">' +
@@ -465,42 +883,64 @@ function runQuizUI(container, examKey, label, questions, onFinish, opts){
           }).join("") +
         '</div>' +
         '<div id="explainWrap"></div>' +
-        '<div class="q-actions"><span></span><button class="btn btn-primary" id="nextBtn" style="display:none;">'+(idx===questions.length-1?"See results":"Next question")+' '+ICON.chevron+'</button></div>' +
+        '<div class="q-actions"><span class="kbd-hint" style="font-size:11.5px;color:var(--text-faint);">Keys 1-'+q.options.length+' to answer &middot; Enter for next</span><button class="btn btn-primary" id="nextBtn" style="display:none;">'+(idx===questions.length-1?"See results":"Next question")+' '+ICON.chevron+'</button></div>' +
       '</div>';
+    if(idx===0) startTimer();
     answered = false;
+
+    function selectOption(i){
+      if(answered) return;
+      answered = true;
+      var chosen = i;
+      var correct = q.correctIndex;
+      Array.prototype.forEach.call(container.querySelectorAll(".q-opt"), function(b2,i2){
+        b2.classList.add("disabled");
+        if(i2===correct) b2.classList.add("correct");
+        else if(i2===chosen) b2.classList.add("incorrect");
+        else b2.classList.add("dim");
+      });
+      var isCorrect = chosen===correct;
+      if(isCorrect) correctCount++; else wrongOnes.push(q);
+      if(q._qid) markWeak(examKey, q._qid, !isCorrect);
+      if(opts.isFullExam){
+        var chId = q._chId;
+        if(!byChapter[chId]) byChapter[chId] = {correct:0,total:0};
+        byChapter[chId].total++;
+        if(isCorrect) byChapter[chId].correct++;
+      }
+      document.getElementById("explainWrap").innerHTML =
+        '<div class="explain-box"><b>'+(isCorrect?"Correct. ":"Not quite. ")+'</b>'+esc(q.explanation||"")+'</div>';
+      document.getElementById("nextBtn").style.display = "inline-flex";
+    }
+
     Array.prototype.forEach.call(container.querySelectorAll(".q-opt"), function(btn){
-      btn.onclick = function(){
-        if(answered) return;
-        answered = true;
-        var chosen = +btn.getAttribute("data-i");
-        var correct = q.correctIndex;
-        Array.prototype.forEach.call(container.querySelectorAll(".q-opt"), function(b2,i2){
-          b2.classList.add("disabled");
-          if(i2===correct) b2.classList.add("correct");
-          else if(i2===chosen) b2.classList.add("incorrect");
-          else b2.classList.add("dim");
-        });
-        var isCorrect = chosen===correct;
-        if(isCorrect) correctCount++;
-        if(opts.isFullExam){
-          var chId = q._chId;
-          if(!byChapter[chId]) byChapter[chId] = {correct:0,total:0};
-          byChapter[chId].total++;
-          if(isCorrect) byChapter[chId].correct++;
-        }
-        document.getElementById("explainWrap").innerHTML =
-          '<div class="explain-box"><b>'+(isCorrect?"Correct. ":"Not quite. ")+'</b>'+esc(q.explanation||"")+'</div>';
-        document.getElementById("nextBtn").style.display = "inline-flex";
-      };
+      btn.onclick = function(){ selectOption(+btn.getAttribute("data-i")); };
     });
     document.getElementById("nextBtn").onclick = function(){
       idx++;
-      if(idx >= questions.length){ renderResult(); }
+      if(idx >= questions.length){ stopActiveTimer(); renderResult(); }
       else renderQ();
     };
+
+    window.__cisiQuizKeyHandler = function(e){
+      if(e.metaKey||e.ctrlKey||e.altKey) return;
+      var key = e.key;
+      if(!answered){
+        var n = parseInt(key,10);
+        if(n>=1 && n<=q.options.length){ e.preventDefault(); selectOption(n-1); return; }
+        var letterIdx = letters.indexOf((key||"").toUpperCase());
+        if(letterIdx>=0 && letterIdx<q.options.length){ e.preventDefault(); selectOption(letterIdx); return; }
+      } else if(key==="Enter" || key===" "){
+        e.preventDefault();
+        document.getElementById("nextBtn").click();
+      }
+    };
+    document.addEventListener("keydown", window.__cisiQuizKeyHandler);
   }
 
   function renderResult(){
+    stopActiveTimer(); stopActiveQuizKeys();
+    var answeredCount = correctCount + wrongOnes.length;
     var p = pct(correctCount, questions.length);
     var breakdownHtml = "";
     if(opts.isFullExam){
@@ -510,20 +950,29 @@ function runQuizUI(container, examKey, label, questions, onFinish, opts){
         return '<div class="breakdown-row"><span>'+esc(ch?ch.title:chId)+'</span><span>'+b.correct+'/'+b.total+' ('+pct(b.correct,b.total)+'%)</span></div>';
       }).join("") + '</div>';
     }
+    var timeoutNote = timedOut ? '<div style="color:var(--red);font-size:12.5px;margin-top:8px;">&#9202; Time\'s up — '+(questions.length-answeredCount)+' question(s) left unanswered, counted as incorrect.</div>' : "";
     container.innerHTML =
       '<div class="quiz-result">' +
         '<div class="score-circle" style="--pct:'+p+'"><div class="inner"><div class="pctnum">'+p+'%</div><div class="pctlbl">SCORE</div></div></div>' +
         '<h2>'+(p>=80?"Excellent work.":p>=60?"Good progress.":"Keep drilling this one.")+'</h2>' +
         '<div style="color:var(--text-faint);font-size:13.5px;">'+correctCount+' correct out of '+questions.length+' — '+esc(label)+'</div>' +
+        timeoutNote +
         breakdownHtml +
         '<div class="result-actions">' +
-          '<button class="btn btn-primary" id="retryBtn">'+ICON.refresh+' Try again</button>' +
+          (wrongOnes.length>0 ? '<button class="btn btn-primary" id="mistakesBtn">'+ICON.target+' Redo '+wrongOnes.length+' mistake'+(wrongOnes.length>1?'s':'')+' only</button>' : '') +
+          '<button class="btn" id="retryBtn">'+ICON.refresh+' Try again</button>' +
           '<button class="btn" id="backBtn">'+ICON.home+' Back</button>' +
         '</div>' +
       '</div>';
     onFinish(p, byChapter);
     document.getElementById("retryBtn").onclick = function(){
-      idx=0; correctCount=0; byChapter={}; questions = shuffle(questions); renderQ();
+      idx=0; correctCount=0; byChapter={}; wrongOnes=[]; timedOut=false; timeLeft = opts.timerSeconds || null;
+      questions = shuffle(questions); renderQ();
+    };
+    var mb = document.getElementById("mistakesBtn");
+    if(mb) mb.onclick = function(){
+      var mistakes = wrongOnes.slice();
+      runQuizUI(container, examKey, label+" — mistakes only", mistakes, function(){}, { isFullExam:false });
     };
     document.getElementById("backBtn").onclick = function(){ history.back(); };
   }
