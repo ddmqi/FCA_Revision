@@ -81,48 +81,6 @@ function cardState(examKey, cardId){
   var ex = ensureExam(examKey);
   return ex.cards[cardId] || null;
 }
-
-/* ---------- exam dates / countdown ---------- */
-function getExamDates(){
-  if(!store.examDates) store.examDates = {};
-  return store.examDates;
-}
-function setExamDate(examKey, dateStr){
-  var d = getExamDates();
-  if(dateStr) d[examKey] = dateStr; else delete d[examKey];
-  saveStore(store);
-}
-function daysUntil(dateStr){
-  if(!dateStr) return null;
-  var target = new Date(dateStr+"T00:00:00");
-  if(isNaN(target.getTime())) return null;
-  var now = new Date();
-  var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  return Math.round((target - startOfToday) / 86400000);
-}
-function weakestChapters(examKey, n){
-  var exam = DATA[examKey];
-  if(!exam) return [];
-  var scored = exam.chapters.map(function(ch){
-    var st = ensureChapter(examKey, ch.id);
-    var score = st.bestScore===null ? -1 : st.bestScore; // never-attempted ranks as most urgent
-    return { ch:ch, score:score, progress: chapterProgressPct(examKey, ch) };
-  });
-  scored.sort(function(a,b){ return a.score - b.score; });
-  return scored.slice(0, n||3);
-}
-function buildTodaysPlan(){
-  var dates = getExamDates();
-  var upcoming = EXAM_KEYS
-    .filter(function(k){ return DATA[k] && dates[k]; })
-    .map(function(k){ return { key:k, days: daysUntil(dates[k]) }; })
-    .filter(function(x){ return x.days !== null && x.days >= 0; })
-    .sort(function(a,b){ return a.days - b.days; });
-  if(upcoming.length===0) return null;
-  var target = upcoming[0];
-  var weakest = weakestChapters(target.key, 3);
-  return { examKey: target.key, days: target.days, chapters: weakest, allUpcoming: upcoming };
-}
 function setCardState(examKey, cardId, known){
   var ex = ensureExam(examKey);
   ex.cards[cardId] = { known: known, ts: Date.now() };
@@ -383,21 +341,11 @@ function contextSnippet(hay, q){
 /* ---------- home ---------- */
 function renderHome(){
   var keys = EXAM_KEYS.filter(function(k){return DATA[k];});
-  var dates = getExamDates();
   var cards = keys.map(function(k){
     var exam = DATA[k];
     var readiness = examReadiness(k);
-    var d = daysUntil(dates[k]);
-    var countdownHtml = "";
-    if(dates[k] && d!==null){
-      if(d < 0) countdownHtml = '<span class="countdown-badge past">Exam date passed</span>';
-      else if(d===0) countdownHtml = '<span class="countdown-badge urgent">Exam is today</span>';
-      else countdownHtml = '<span class="countdown-badge'+(d<=7?' urgent':'')+'">'+d+' day'+(d===1?'':'s')+' left</span>';
-    }
     return '<div class="exam-card" data-exam="'+k+'">' +
-      '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">' +
-        '<span class="tag">'+esc(exam.subtitle)+'</span>' + countdownHtml +
-      '</div>' +
+      '<span class="tag">'+esc(exam.subtitle)+'</span>' +
       '<h3>'+esc(exam.title)+'</h3>' +
       '<div class="fmt">'+esc(exam.examFormat)+'</div>' +
       '<div class="stats">' +
@@ -409,60 +357,20 @@ function renderHome(){
         '<div class="readiness-bar"><div style="width:'+readiness+'%"></div></div>' +
         '<div class="readiness-label"><span>Readiness</span><span>'+readiness+'%</span></div>' +
       '</div>' +
-      '<label class="exam-date-row" data-nostop="1"><span>Exam date</span><input type="date" class="exam-date-input" data-exam="'+k+'" value="'+(dates[k]||'')+'"/></label>' +
     '</div>';
   }).join("");
-
-  var plan = buildTodaysPlan();
-  var planHtml = "";
-  if(plan){
-    var planExam = DATA[plan.examKey];
-    planHtml =
-      '<div class="today-plan">' +
-        '<div class="today-plan-head">' +
-          '<div class="today-plan-kicker">'+ICON.target+' Today\'s focus</div>' +
-          '<div class="today-plan-days">'+plan.days+' day'+(plan.days===1?'':'s')+' until <b>'+esc(planExam.title)+'</b></div>' +
-        '</div>' +
-        '<div class="today-plan-chapters">' +
-          plan.chapters.map(function(item){
-            var label = item.score<0 ? "not started" : item.score+"% best score";
-            return '<div class="today-plan-chip" data-exam="'+plan.examKey+'" data-ch="'+item.ch.id+'">'+
-              '<span class="chapter-num">'+item.ch.number+'</span>'+
-              '<span><b>'+esc(item.ch.title)+'</b><br/><span style="color:var(--text-faint);font-size:11.5px;">'+label+'</span></span>'+
-            '</div>';
-          }).join("") +
-        '</div>' +
-      '</div>';
-  }
 
   app.innerHTML =
     '<div class="hero">' +
       '<h1>Get exam-ready.</h1>' +
       '<p>Every notion, every figure, every question style the examiner could throw at you — across all three CISI papers, in one place.</p>' +
     '</div>' +
-    planHtml +
     '<div class="exam-grid">'+cards+'</div>' +
     '<div class="footer-note">Built from your CISI study manuals · Data stays on this device (localStorage)</div>';
 
   Array.prototype.forEach.call(app.querySelectorAll(".exam-card"), function(el){
-    el.onclick = function(e){
-      if(e.target.closest('[data-nostop]')) return;
-      navigate([el.getAttribute("data-exam")]);
-    };
+    el.onclick = function(){ navigate([el.getAttribute("data-exam")]); };
   });
-  Array.prototype.forEach.call(app.querySelectorAll(".exam-date-input"), function(inp){
-    inp.onclick = function(e){ e.stopPropagation(); };
-    inp.onchange = function(e){
-      e.stopPropagation();
-      setExamDate(inp.getAttribute("data-exam"), inp.value);
-      render();
-    };
-  });
-  if(plan){
-    Array.prototype.forEach.call(app.querySelectorAll(".today-plan-chip"), function(el){
-      el.onclick = function(){ navigate([el.getAttribute("data-exam"), el.getAttribute("data-ch"), "summary"]); };
-    });
-  }
 }
 
 /* ---------- exam overview ---------- */
@@ -642,9 +550,7 @@ function renderExportPage(examKey){
         '<button class="chip active" data-m="both">Summary + Detailed notes</button>' +
         '<button class="chip" data-m="summary">Summary only</button>' +
         '<button class="chip" data-m="detail">Detailed notes only</button>' +
-        '<button class="chip" data-m="cheatsheet">Cheat sheet (condensed)</button>' +
       '</div>' +
-      '<div id="modeHint" class="export-hint"></div>' +
       '<div class="export-section-title" style="margin-top:22px;">Chapters <span style="font-weight:400;color:var(--text-faint);">('+exam.chapterCount+')</span></div>' +
       '<div class="opt-row" style="margin-bottom:10px;">' +
         '<button class="btn btn-sm" id="selAll">Select all</button>' +
@@ -659,21 +565,11 @@ function renderExportPage(examKey){
   app.querySelector('[data-nav="exam"]').onclick = function(){ navigate([examKey]); };
 
   var mode = "both";
-  var MODE_HINTS = {
-    both: "Full course notes: summary plus every detailed section, tables and diagrams. Best for a first thorough read.",
-    summary: "Just the high-yield chapter overviews. Good for a quick refresher.",
-    detail: "The complete detailed notes only, no summaries. Best as a reference to search through.",
-    cheatsheet: "Ultra-condensed: every flashcard in this exam as a dense term/answer list, grouped by chapter. Built for a last-minute re-read the night before or morning of the exam."
-  };
   var modeChips = document.getElementById("modeChips");
-  var modeHint = document.getElementById("modeHint");
-  function updateHint(){ modeHint.textContent = MODE_HINTS[mode]; }
-  updateHint();
   Array.prototype.forEach.call(modeChips.querySelectorAll(".chip"), function(c){
     c.onclick = function(){
       Array.prototype.forEach.call(modeChips.querySelectorAll(".chip"), function(x){x.classList.remove("active");});
       c.classList.add("active"); mode = c.getAttribute("data-m");
-      updateHint();
     };
   });
   document.getElementById("selAll").onclick = function(){
@@ -702,51 +598,30 @@ function generatePrintDoc(examKey, chapterIds, mode){
       '<h1>'+esc(exam.title)+'</h1>' +
       '<div class="print-cover-sub">'+esc(exam.subtitle)+' &middot; '+esc(exam.examFormat)+'</div>' +
       '<div class="print-cover-meta">Generated '+dateStr+' &middot; '+chapters.length+' of '+exam.chapterCount+' chapters &middot; '+
-        (mode==="both"?"Summary + detailed notes":mode==="summary"?"Summary only":mode==="detail"?"Detailed notes only":"Cheat sheet (condensed)") +
+        (mode==="both"?"Summary + detailed notes":mode==="summary"?"Summary only":"Detailed notes only") +
       '</div>' +
       '<div class="print-toc"><b>Contents</b><ol>' +
         chapters.map(function(ch){ return '<li>'+esc(ch.title)+(ch.examWeight?' <span>&middot; '+esc(ch.examWeight)+'</span>':'')+'</li>'; }).join("") +
       '</ol></div>' +
     '</div>';
 
-  var body;
-  if(mode==="cheatsheet"){
-    var totalCards = 0;
-    body = '<div class="print-cheat-doc">' +
-      '<div class="print-cheat-head"><div class="print-ch-kicker">'+esc(exam.title)+'</div><h2>Cheat sheet</h2><div class="print-weight">Every flashcard, grouped by chapter &mdash; for a fast last-minute read.</div></div>' +
-      chapters.map(function(ch){
-        var cards = ch.flashcards || [];
-        totalCards += cards.length;
-        if(cards.length===0) return "";
-        return '<div class="print-cheat-chapter">' +
-          '<h3 class="print-cheat-ch-title">'+ch.number+'. '+esc(ch.title)+'</h3>' +
-          '<div class="print-cheat-grid">' +
-            cards.map(function(fc){
-              return '<div class="print-cheat-item"><b>'+esc(fc.front)+'</b> &mdash; '+esc(fc.back)+'</div>';
-            }).join("") +
-          '</div>' +
-        '</div>';
-      }).join("") +
-    '</div>';
-  } else {
-    body = chapters.map(function(ch){
-      var parts = '<div class="print-chapter">' +
-        '<div class="print-ch-kicker">'+esc(exam.title)+'</div>' +
-        '<h2>'+ch.number+'. '+esc(ch.title)+'</h2>' +
-        (ch.examWeight ? '<div class="print-weight">'+esc(ch.examWeight)+'</div>' : '');
-      if(mode==="both" || mode==="summary"){
-        parts += '<h3 class="print-subhead">Summary</h3><div class="prose">'+(ch.summaryHtml||"")+'</div>';
-      }
-      if(mode==="both" || mode==="detail"){
-        parts += '<h3 class="print-subhead">Detailed notes</h3>';
-        (ch.sections||[]).forEach(function(s){
-          parts += '<h4 class="print-sec-h">'+esc(s.heading)+'</h4><div class="prose">'+s.html+'</div>';
-        });
-      }
-      parts += '</div>';
-      return parts;
-    }).join("");
-  }
+  var body = chapters.map(function(ch){
+    var parts = '<div class="print-chapter">' +
+      '<div class="print-ch-kicker">'+esc(exam.title)+'</div>' +
+      '<h2>'+ch.number+'. '+esc(ch.title)+'</h2>' +
+      (ch.examWeight ? '<div class="print-weight">'+esc(ch.examWeight)+'</div>' : '');
+    if(mode==="both" || mode==="summary"){
+      parts += '<h3 class="print-subhead">Summary</h3><div class="prose">'+(ch.summaryHtml||"")+'</div>';
+    }
+    if(mode==="both" || mode==="detail"){
+      parts += '<h3 class="print-subhead">Detailed notes</h3>';
+      (ch.sections||[]).forEach(function(s){
+        parts += '<h4 class="print-sec-h">'+esc(s.heading)+'</h4><div class="prose">'+s.html+'</div>';
+      });
+    }
+    parts += '</div>';
+    return parts;
+  }).join("");
 
   var root = document.getElementById("printRoot");
   if(!root){
